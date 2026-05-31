@@ -632,7 +632,7 @@ def generate_prompt_from_spec(
         etype = elem.get("type", "unknown")
         if str(etype).lower() in EXTERNAL_IMAGE_TYPES or str(etype).lower() in REFERENCE_ONLY_IMAGE_TYPES:
             continue
-        content = elem.get("content", "")
+        content = _element_text_content(elem)
         etype_lower = str(etype).lower()
         if high_detail_slot_ids and etype_lower in {"title", "headline", "heading"}:
             content = _wrap_title_for_asset_first_layout(content)
@@ -706,6 +706,54 @@ def generate_prompt_from_spec(
         + elements_text
         + LANGUAGE_FONT_RULE
     )
+
+
+def _stringify_content_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        return "；".join(str(x).strip() for x in value if str(x).strip())
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value).strip()
+
+
+def _element_text_content(elem: Dict[str, Any], *, include_description: bool = False) -> str:
+    """Return human-facing text from a slide_spec element.
+
+    SKILL.md documents both `content` and `heading`/`body` element shapes.
+    Prompt generation and text-density heuristics must serialize either shape,
+    otherwise card-like specs become empty text guides.
+    """
+    content = _stringify_content_value(elem.get("content"))
+    if content:
+        return content
+
+    parts: List[str] = []
+    for key in ("heading", "title", "label"):
+        value = _stringify_content_value(elem.get(key))
+        if value:
+            parts.append(value)
+            break
+    for key in ("body", "text"):
+        value = _stringify_content_value(elem.get(key))
+        if value:
+            parts.append(value)
+            break
+
+    items = elem.get("items")
+    if items is None:
+        items = elem.get("bullets")
+    item_text = _stringify_content_value(items)
+    if item_text:
+        parts.append(item_text)
+
+    if parts:
+        return "：".join(parts[:2]) + ("；" + "；".join(parts[2:]) if len(parts) > 2 else "")
+
+    if include_description:
+        return _stringify_content_value(elem.get("description"))
+    return ""
 
 
 def _adapt_style_template_for_external_slots(style_template: str) -> str:
@@ -1251,10 +1299,7 @@ def _slide_text_load(slide_spec: Dict[str, Any]) -> int:
         etype = str(elem.get("type", "")).lower()
         if etype in EXTERNAL_IMAGE_TYPES or etype in REFERENCE_ONLY_IMAGE_TYPES:
             continue
-        content = elem.get("content") or elem.get("description") or ""
-        if isinstance(content, (list, tuple)):
-            content = " ".join(str(x) for x in content)
-        chars += len(str(content).strip())
+        chars += len(_element_text_content(elem, include_description=True))
     layout_text = str(slide_spec.get("layout") or "")
     return chars + min(len(layout_text), 80)
 
@@ -1269,10 +1314,7 @@ def _slide_text_profile(slide_spec: Dict[str, Any]) -> Dict[str, Any]:
         etype = str(elem.get("type", "")).lower()
         if etype in EXTERNAL_IMAGE_TYPES or etype in REFERENCE_ONLY_IMAGE_TYPES:
             continue
-        content = elem.get("content") or elem.get("description") or ""
-        if isinstance(content, (list, tuple)):
-            content = " ".join(str(x) for x in content)
-        length = len(str(content).strip())
+        length = len(_element_text_content(elem, include_description=True))
         if not length:
             continue
         text_blocks += 1
@@ -1533,13 +1575,17 @@ def _template_slot_candidates(slide_spec: Dict[str, Any]) -> List[Tuple[List[flo
     if any(t in layout_text for t in [
         "左文右图", "右侧为图", "右侧为图片", "右侧为照片", "图像在右", "图片在右",
         "left text right image", "text left image right", "right image", "image on the right",
-        "photo on the right", "media on the right",
+        "photo on the right", "right photo", "photo right", "right photograph", "right visual",
+        "right landscape photo", "right preserved landscape photo",
+        "media on the right",
     ]):
         add([0.52, 0.10, 0.42, 0.78], "template inferred right image column", 1.10)
     if any(t in layout_text for t in [
         "右文左图", "左侧为图", "左侧为图片", "左侧为照片", "图像在左", "图片在左",
         "right text left image", "text right image left", "left image", "image on the left",
-        "photo on the left", "media on the left",
+        "photo on the left", "left photo", "photo left", "left photograph", "left visual",
+        "left landscape photo", "left preserved landscape photo",
+        "media on the left",
     ]):
         add([0.06, 0.10, 0.42, 0.78], "template inferred left image column", 1.10)
     if any(t in layout_text for t in ["图片区在左", "左侧图片", "左侧照片", "左侧主视觉", "left visual", "left media"]):
@@ -1730,7 +1776,7 @@ def _auto_external_image_region(
 
     if text_load >= 180:
         if ratio >= 1.25:
-            return [0.14, 0.66, 0.72, 0.24], f"auto bottom band for text-heavy slide; {planning_bits}"
+            return [0.56, 0.20, 0.36, 0.50], f"auto right landscape block for text-heavy slide; {planning_bits}"
         if ratio < 0.8:
             return [0.68, 0.17, 0.24, 0.64], f"auto narrow right rail for text-heavy portrait; {planning_bits}"
         return [0.64, 0.22, 0.28, 0.42], f"auto compact right slot for text-heavy slide; {planning_bits}"

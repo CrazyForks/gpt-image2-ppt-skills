@@ -423,6 +423,7 @@ python3 scripts/generate_ppt.py \
 - 外部真实图片页不能简单堆叠“模板照片/图片区 prompt”和“留空 prompt”。构造 prompt 前必须先消解冲突：模板只提供配色、字体、网格、节奏和装饰语言；模板里的照片区、图片框、全幅图、裁切图等都视为已被真实图片槽位替代。
 - 构造 `slide_spec` 时，`position` 不能随便选，也不要默认固定右侧。模板克隆模式下，优先让模板 profile 提供 `external_image_slots`，或从模板布局摘要推断候选图片区，再根据本页文字量、真实图片数量、真实图片比例和页面类型打分：文字多时优先保证标题/正文阅读区；图片多或比例极端时优先用模板原有分栏/上下布局；无法共存时减少装饰和假视觉主体，而不是让真实图压内容。
 - 推荐先写 `layout_intent: "auto"`，不手写 `position`。脚本会读取模板候选槽位、真实图尺寸、文字量、图片数量和比例来选择位置，写入 `position` / `computed_bbox` / `auto_layout_reason`；只有自动规划不理想时才用人工 `position` 覆盖。
+- 使用 `layout_intent: "auto"` 时，`slide_spec.layout` 尽量写清图片区方向和结构，例如"左文右图 / right image / right landscape photo / 底部图片 / portrait rail"。自动规划会优先从这些方向性描述和模板候选槽位推断真实图区域；描述过泛时，重文本页可能退化到保守的小图槽位。
 - `position` 默认可作为“允许使用的区域”；`computed_bbox` 才是脚本算出的最终真实图片槽位。
 - 如果你想完全固定坐标，不要量体裁衣，直接写 `bbox`，或设置 `slot_strategy: "exact"` / `tailor_to_asset: false`。
 - 最终精度由 `python-pptx` 坐标保证，不由模型画框保证。
@@ -435,6 +436,7 @@ python3 scripts/generate_ppt.py \
 - `fit: "contain"` 保留完整图片；`fit: "cover"` 会居中裁剪图片来铺满槽位。
 - 如果要“严丝合缝”无白边，使用 `fit: "cover"`、`padding: 0`、`outline_width: 0`，并设置很小的 `bleed`（例如 `0.0015`-`0.003`）让图片比槽位多铺出约 1-3px，抵消 PowerPoint / Quick Look 渲染取整和抗锯齿缝隙。
 - 如果想“预留一点但不要莫名空隙”，不要靠后期 `contain` 硬塞进一个比例不匹配的大框；应使用 `fit-within` 先算好比例匹配的槽位，再用很小的 `padding` 做设计留白。
+- 交付前必须抽查 `external_image_trace/slide-XX/manifest.json`：重点看 `final_image_rect_px` 是否符合视觉预期，`auto_layout_reason` 是否选中了正确的左右/上下区域。若横图被算成小缩略图、竖图过窄或位置压内容，先补清楚 `slide_spec.layout` 的方向意图，或显式设置 `position`，再重新生成该页背景并重新打包 PPTX。
 
 整体原理图保存于 `docs/external_image_overlay_logic.txt`；修改外部真实图片链路时，先对照这张图确认顺序仍是“模板/页面/素材画像 -> 候选槽位打分 -> 透明 skeleton -> 背景生成 -> 后贴真实图 -> 质检/有限修复”。
 
