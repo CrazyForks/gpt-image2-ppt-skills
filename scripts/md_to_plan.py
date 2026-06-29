@@ -20,7 +20,7 @@ Rules:
   present; otherwise slides are numbered by order of appearance.
 - Optional `[page_type]` or `[page_type, layout=<id>]` directive immediately
   after the number. `page_type` defaults to `content`. Known values: cover /
-  content / data.
+  agenda / section / content / data / quote / closing / other.
 - The remaining text of the heading line (after directive) is the slide's title
   line and becomes the FIRST line of the output `content` field. A blank line
   plus body lines follow, matching the existing JSON convention.
@@ -40,7 +40,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-VALID_PAGE_TYPES = {"cover", "content", "data"}
+VALID_PAGE_TYPES = {"cover", "agenda", "section", "content", "data", "quote", "closing", "other"}
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 

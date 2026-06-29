@@ -29,12 +29,14 @@ generate_ppt.py
 
 ```text
 slides_plan.md                      styles/<id>.md
-      │                                    │
-      │  md_to_plan.py                     │
-      ▼                                    │
+	      │                                    │
+	      │  md_to_plan.py                     │
+	      ▼                                    │
 slides_plan.json                           │
-      │                                    │
-      │  Agent 综合两者，为每页构造 slide_spec  │
+	      │                                    ├─ optional: styles/<id>.layouts.json
+	      │                                    │   (layout bank sidecar)
+	      │                                    │
+	      │  Agent 综合两者，为每页构造 slide_spec  │
       │  (type / content / position /       │
       │   style / color)                    │
       │  写入每页 .slide_spec 字段            │
@@ -42,11 +44,13 @@ slides_plan.json                           │
 ┌────────────────────────────────────────────────────┐
 │                  generate_ppt.py                    │
 │                                                    │
-│  slide_spec 有 elements?                            │
-│   ├── YES → generate_prompt_from_spec()             │
-│   │        逐元素描述位置、内容、样式 → 精确 prompt    │
-│   └── NO  → generate_prompt()                       │
-│             自由格式 content → 基础 prompt            │
+│  style layout sidecar 存在?                          │
+│   ├── YES → assign_layouts()                         │
+│   │        → render_prompt_from_template()            │
+│   │        → 保留页面形态并写入 template_layout_profile │
+│   └── NO  → slide_spec 有 elements?                  │
+│        ├── YES → generate_prompt_from_spec()          │
+│        └── NO  → generate_prompt()                    │
 │                                                    │
 │  并发派发 → gpt-image-2 出图                          │
 │       │                                            │
@@ -59,6 +63,8 @@ slides_plan.json                           │
 └────────────────────────────────────────────────────┘
 ```
 
+内置风格推荐采用双文件格式：`styles/<id>.md` 存人读风格说明，`styles/<id>.layouts.json` 存机器读 layout bank。JSON sidecar 与 TemplateProfile 兼容，但通常不含 `reference_image`，因此只提供页面形态、容量和适用场景，不做像素级模板页参考。
+
 ### 2.2 模板克隆 (`--template-pptx`)
 
 ```text
@@ -70,9 +76,10 @@ template_renders/<stem>/page-NN.png
       │
       │  template_analyzer.py (vision 分析, 结果缓存)
       ▼
-template_cache/<sha256>.json  (TemplateProfile: layouts + global_style)
+template_cache/<sha256>.json  (TemplateProfile: layouts + variation metadata + global_style)
       │
-      │  match_layout() → coerce_fields() → render_prompt_from_template()
+      │  assign_layouts() 优先分配未使用 layout
+      │      → coerce_fields() → render_prompt_from_template()
       ▼
   每页 prompt ──→ gpt-image-2
                   (可选 --template-strict → 模板页作 reference image)
@@ -228,6 +235,17 @@ outputs/20240523_143052/        ← 新增 slide-02, slide-04
   "slide_number": 3,
   "page_type": "content",
   "layout": "两个卡片纵向排列",
+  "template_layout_profile": {
+    "id": "content-two-cards",
+    "page_type": "content",
+    "summary": "左上标题，主体为两个纵向卡片，右下有几何装饰",
+    "visual_signature": "纵向双卡片",
+    "content_capacity": { "items": "2 个短卡片，每卡 1 个标题 + 1 句正文" },
+    "best_for": ["feature comparison", "two key points"],
+    "avoid_for": ["dense table", "long prose"],
+    "variation_tags": ["cards", "two-column"],
+    "reuse_friendly": true
+  },
   "elements": {
     "title": {
       "type": "heading",
@@ -263,6 +281,8 @@ outputs/20240523_143052/        ← 新增 slide-02, slide-04
 | `style` | 字体/样式描述 | `"48pt Bold 思源黑体"` |
 | `color` | 颜色 | `"#00ff88"` |
 | `description` | 装饰类元素的描述 | `"深色渐变，左侧极光纹理"` |
+
+模板克隆模式下，即使 plan 没有手写 `slide_spec`，生成流程也会把命中的 layout 摘要写入 `template_layout_profile`。这个字段只保存布局决策所需的精简信息，不保存 `reference_image` 绝对路径；后续外部图片槽位规划、编辑和复盘可以据此知道该页使用了哪种模板形态。
 
 **元素 ID 命名规范：**
 

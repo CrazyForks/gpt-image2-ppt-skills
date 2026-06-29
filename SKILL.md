@@ -48,6 +48,19 @@ description: Generate visually striking PPT slides via OpenAI's gpt-image-2 -- u
 
 > 风格选择原则：先根据内容场景在 `styles/` 里选择最贴近的一套。技术类可优先看 `dark-aurora` / `gradient-glass` / `data-science-consulting`，商务类可优先看 `clean-tech-blue` / `editorial-mono` / `eco-green-business-plan` / `investment-company-business-plan`，文化生活类可优先看 `japanese-wabi` / `vector-illustration` / `culinary-innovation` / `flowery`，学术类可优先看 `swiss-grid` / `geometric-duotone-thesis` / `final-year-project-thesis-defense`，工作坊与培训类可优先看 `hand-sketch` / `mind-maps-workshop-professional` / `mindfulness-in-the-classroom-breathing-techniques`。
 
+### 内置风格的 layout bank sidecar（推荐新格式）
+
+内置风格采用“MD 给人看，JSON 给机器用”的双文件结构：
+
+```text
+styles/<style-id>.md            # 风格说明、设计令牌、基础提示词
+styles/<style-id>.layouts.json  # 可选；每页 layout bank，供自动分配页面形态
+```
+
+当 `--style styles/<style-id>.md` 存在同名 `.layouts.json` 时，`generate_ppt.py` 会自动把它作为无 reference image 的 TemplateProfile 使用：优先通过 `assign_layouts()` 分配不同 layout，把 `visual_signature` / `content_capacity` / `best_for` / `avoid_for` / `variation_tags` 写入 prompt，并把命中的 layout 精简信息写入 `metadata.json`。
+
+当前所有内置 `styles/*.md` 都应配套同名 `.layouts.json`。以后蒸馏公开模板或内置风格时，优先补这个 JSON sidecar；不要把多页 layout 只压缩进单个 MD 的“布局系统”文字段落。
+
 ## 模板克隆模式
 
 直接给 skill 一个 .pptx 模板，后续所有页都仿这个模板。
@@ -318,7 +331,7 @@ GPT_IMAGE_BACKEND=codex              # 不想每次敲 --backend 就设这个
    ````
    - h2 格式：`## N. [page_type, layout=layout-05] 本页标题行`
    - `N.` 可省（按出现顺序自动编号）；`[page_type]` 可省（默认 `content`）；`layout=` 只在模板克隆模式需要
-   - `page_type`: `cover` / `content` / `data`
+   - `page_type`: `cover` / `agenda` / `section` / `content` / `data` / `quote` / `closing` / `other`
    - h2 标题行 → json 里 `content` 的第一行；下面的正文 → 正文
 3. 用户 OK 后，转 json：
    ```bash
@@ -449,7 +462,7 @@ python3 scripts/generate_ppt.py \
 
 1. **拿到模板 .pptx**（用户提供 / 内部模板库 / 网络下载）
 2. **（可选）先单独渲染并人工挑选**----大模板（>15 页）建议先 `python3 scripts/render_template.py xxx.pptx`，再从 `template_renders/<stem>/` 里挑 8-12 张代表页复制到 `template_renders/<stem>_curated/`，供 vision 分析。页数越精，layout 命中越准
-3. **生成 slides_plan.md → 转 slides_plan.json**（见指定风格流程第 2-3 步）。每页 `slide_number` / `page_type` (`cover` / `content` / `data` / 等) / `content`；想精准对位时在 h2 里加 `layout=layout-NN`（NN = 模板第 N 页 / 你期望对应的模板页编号）
+3. **生成 slides_plan.md → 转 slides_plan.json**（见指定风格流程第 2-3 步）。每页 `slide_number` / `page_type` (`cover` / `agenda` / `section` / `content` / `data` / `quote` / `closing` / `other`) / `content`；想精准对位时在 h2 里加 `layout=layout-NN`（NN = 模板第 N 页 / 你期望对应的模板页编号）
 4. **出图冒烟**。API 直连 / 非 Codex 原生路径跑 `generate_ppt.py`：
    ```bash
    python3 scripts/generate_ppt.py \
@@ -476,6 +489,15 @@ python3 scripts/generate_ppt.py \
 
 vision 分析时会给每个 layout 标 `reuse_friendly`：
 
+TemplateProfile 每个 layout 除了 `id` / `page_type` / `summary` / `json_schema` / `reference_image`，还会尽量保存：
+
+- `visual_signature`：这页最明显的视觉差异点，例如"右图左文"、"编号时间线"、"三卡片网格"。
+- `content_capacity`：适合承载的信息密度，避免把长文塞进强视觉页。
+- `best_for` / `avoid_for`：适合或不适合的内容结构。
+- `variation_tags`：英文短标签，用来帮助比较和错开 layout 形态。
+
+生成时会用 `assign_layouts()` 优先分配未使用 layout；即使 plan 没有手写 `slide_spec`，命中的模板 layout 也会以精简版 `template_layout_profile` 写进 `metadata.json`，便于后续编辑、贴图槽位规划和复盘。
+
 | reuse_friendly | 典型 layout | 多次使用的代价 |
 | --- | --- | --- |
 | `false`（不可复用，(!) 强警告） | 封面、3 个具名角色插画页、独特场景图（雪山/广播塔/复古收音机）、5 步骤 zigzag 各步独有图标、novelty 数据中央装置 | 视觉重复非常明显，观众会困惑 |
@@ -485,7 +507,7 @@ Agent 在搭 plan 时的执行策略：
 1. **优先把模板里 N 个不同 layout 分配给 N 页 slide**（N 不够就在 SKILL 里看 reuse_friendly=true 的部分挑能复用的）
 2. **如果 plan 里某页内容结构非常相似（比如多个"5 步骤流程"），先尝试改写内容用不同 layout 表达**（4 步骤 + 5 步骤分别用不同流程页），而不是同一个 zigzag 用两次
 3. **冒烟跑完后，看 `Layout 复用检测` 那段输出**：(!) 必须改，(i) 看情况改；改 plan 里相应 slide 的 `layout_id` 即可
-4. **看完 profile JSON 选 layout**：`cat <cwd>/template_cache/<sha256>.json | jq '.layouts[] | {id, page_type, reuse_friendly, summary}'`；如果是多模态 agent 自己生成的 `template_profile.json`，就读取那个文件。
+4. **看完 profile JSON 选 layout**：`cat <cwd>/template_cache/<sha256>.json | jq '.layouts[] | {id, page_type, reuse_friendly, visual_signature, content_capacity, summary}'`；如果是多模态 agent 自己生成的 `template_profile.json`，就读取那个文件。
 
 `generate_ppt.py` 在派发任务前会自动跑一次复用检测，把警告打到终端，不阻塞执行。
 

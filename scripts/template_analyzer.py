@@ -9,7 +9,7 @@ PPT 模板剖析器 -- 把用户的 .pptx + 渲染图喂给 vision，吐出 Temp
 4. VisionClient: 封装 OpenAI 兼容 chat completions 多模态调用
 5. vision_analyze: 调 vision 抽 global_style + 每页 summary/page_type/json_schema
 6. analyze_template: 顶层入口，带缓存
-7. match_layout: 按 page_type / layout_id 匹配 slide -> layout
+7. assign_layouts: 按 layout_id / page_type 分配 slide -> layout，优先不复用 layout
 8. coerce_fields: 把自由 content 字符串拆解成 layout schema 的 fields
 """
 from __future__ import annotations
@@ -294,6 +294,14 @@ GLOBAL_USER_TPL = """请基于下方 {n_images} 张 PPT 页的缩略图（按从
       "page_index": 0,
       "page_type": "cover|agenda|section|content|data|quote|closing|other",
       "summary": "用 60-120 字描述这页的视觉布局和内容编排方式，重点描写位置、装饰、文字层级，不要描述具体的文字内容",
+      "visual_signature": "用 10-30 字概括这页最容易被观众记住的版式特征，如右图左文/三卡片/编号时间线",
+      "content_capacity": {{
+        "title": "建议标题字数或形态",
+        "body": "建议正文容量，例如 3-5 个短要点 / 1 个大数字 + 2 条解释"
+      }},
+      "best_for": ["适合承载的内容结构，例如 agenda / feature list / comparison / quote"],
+      "avoid_for": ["不适合承载的内容结构，例如 dense table / long legal copy"],
+      "variation_tags": ["split", "cards", "timeline", "image-right"],
       "external_image_slots": [
         {
           "id": "hero-image",
@@ -326,6 +334,10 @@ GLOBAL_USER_TPL = """请基于下方 {n_images} 张 PPT 页的缩略图（按从
 - 字段长度 (minLength/maxLength) 要根据该页可容纳的字数实际给出，不要给死值。
 - 如果某页含数据图表，必须有 "metrics" 这种 array 字段；如果是列表页要有 "items" array；
   封面要有 title/subtitle；目录页要有 items；数据页要有 metrics 或 stats。
+- visual_signature / content_capacity / best_for / avoid_for / variation_tags 用来帮助后续自动分配不同页面形态：
+  * visual_signature 要短，描述视觉差异，而不是复述 page_type。
+  * content_capacity 要表达这页最多适合放多少信息，避免把长文塞进强视觉页。
+  * variation_tags 使用英文短标签，方便比较布局差异。
 - 颜色用 #RRGGBB；不确定就给最接近的近似值。
 - 严格只返回 JSON 一个对象，无其他文本。
 
@@ -404,6 +416,17 @@ def vision_analyze(images: List[str], client: VisionClient, pptx_meta: Dict[str,
         else:
             layout.setdefault("reuse_friendly", True)
             layout.setdefault("reuse_reason", "")
+        layout["visual_signature"] = str(layout.get("visual_signature") or "").strip()
+        capacity = layout.get("content_capacity")
+        layout["content_capacity"] = capacity if isinstance(capacity, (dict, list, str)) else {}
+        for key in ("best_for", "avoid_for", "variation_tags"):
+            val = layout.get(key)
+            if isinstance(val, list):
+                layout[key] = [str(x).strip() for x in val if str(x).strip()]
+            elif isinstance(val, str) and val.strip():
+                layout[key] = [val.strip()]
+            else:
+                layout[key] = []
         slots = layout.get("external_image_slots")
         layout["external_image_slots"] = slots if isinstance(slots, list) else []
     return result
@@ -805,6 +828,30 @@ def render_prompt_from_template(
     if g_style:
         parts.append(f"【全局风格】\n{g_style}")
     parts.append(f"【布局描述】\n{layout.get('summary', '').strip()}")
+
+    variation_lines: List[str] = []
+    visual_signature = str(layout.get("visual_signature") or "").strip()
+    if visual_signature:
+        variation_lines.append(f"- 视觉签名: {visual_signature}")
+    content_capacity = layout.get("content_capacity")
+    if content_capacity:
+        if isinstance(content_capacity, str):
+            capacity_text = content_capacity
+        else:
+            capacity_text = json.dumps(content_capacity, ensure_ascii=False)
+        variation_lines.append(f"- 内容容量: {capacity_text}")
+    for key, label in (
+        ("best_for", "适合内容"),
+        ("avoid_for", "避免内容"),
+        ("variation_tags", "变体标签"),
+    ):
+        val = layout.get(key)
+        if isinstance(val, list) and val:
+            variation_lines.append(f"- {label}: {', '.join(str(x) for x in val if str(x))}")
+        elif isinstance(val, str) and val.strip():
+            variation_lines.append(f"- {label}: {val.strip()}")
+    if variation_lines:
+        parts.append("【版式变体信息】\n" + "\n".join(variation_lines))
 
     parts.append("【本页内容】")
     schema_props = ((layout.get("json_schema") or {}).get("properties") or {}) if isinstance(layout.get("json_schema"), dict) else {}

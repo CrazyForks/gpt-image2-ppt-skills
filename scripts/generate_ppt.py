@@ -836,6 +836,87 @@ def load_style_template(style_path: str) -> str:
     return extracted.strip()
 
 
+def _style_layout_sidecar_path(style_path: str) -> Path:
+    path = Path(style_path)
+    if path.suffix:
+        return path.with_suffix(".layouts.json")
+    return Path(f"{style_path}.layouts.json")
+
+
+def load_style_layout_profile(
+    style_path: str,
+    style_template: str = "",
+) -> Optional[Dict[str, Any]]:
+    """Load optional styles/<id>.layouts.json as a TemplateProfile-compatible dict."""
+    sidecar = _style_layout_sidecar_path(style_path)
+    if not sidecar.is_file():
+        return None
+
+    with open(sidecar, "r", encoding="utf-8") as f:
+        profile = json.load(f)
+    if not isinstance(profile, dict):
+        raise ValueError(f"Style layout sidecar must be a JSON object: {sidecar}")
+
+    layouts = profile.get("layouts")
+    if not isinstance(layouts, list) or not layouts:
+        raise ValueError(f"Style layout sidecar must contain non-empty layouts: {sidecar}")
+
+    style_summary = str(profile.get("global_style") or "").strip()
+    if style_template and style_summary:
+        profile["global_style"] = f"{style_template}\n\n【内置 layout bank 风格摘要】\n{style_summary}"
+    elif style_template:
+        profile["global_style"] = style_template
+    else:
+        profile["global_style"] = style_summary
+
+    profile.setdefault("version", "2")
+    profile.setdefault("source", sidecar.name)
+    profile.setdefault("source_hash", "")
+    profile.setdefault("theme", {})
+    profile.setdefault("style_id", Path(style_path).stem)
+    profile["is_style_layout_bank"] = True
+
+    valid_types = {"cover", "agenda", "section", "content", "data", "quote", "closing", "other"}
+    for idx, layout in enumerate(layouts):
+        if not isinstance(layout, dict):
+            raise ValueError(f"Style layout entry #{idx + 1} must be an object: {sidecar}")
+        layout.setdefault("id", f"layout-{idx + 1:02d}")
+        layout.setdefault("page_index", idx)
+        if layout.get("page_type") not in valid_types:
+            layout["page_type"] = "content"
+        layout.setdefault("summary", "")
+        layout["visual_signature"] = str(layout.get("visual_signature") or "").strip()
+        capacity = layout.get("content_capacity")
+        layout["content_capacity"] = capacity if isinstance(capacity, (dict, list, str)) else {}
+        for key in ("best_for", "avoid_for", "variation_tags"):
+            val = layout.get(key)
+            if isinstance(val, list):
+                layout[key] = [str(x).strip() for x in val if str(x).strip()]
+            elif isinstance(val, str) and val.strip():
+                layout[key] = [val.strip()]
+            else:
+                layout[key] = []
+        layout["external_image_slots"] = (
+            layout.get("external_image_slots")
+            if isinstance(layout.get("external_image_slots"), list)
+            else []
+        )
+        layout.setdefault("reuse_friendly", layout.get("page_type") != "cover")
+        layout.setdefault("reuse_reason", "")
+        layout["reference_image"] = layout.get("reference_image") or None
+        layout.setdefault("json_schema", {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "minLength": 1, "maxLength": 40},
+                "body": {"type": "string", "minLength": 0, "maxLength": 600},
+            },
+            "required": ["title"],
+            "additionalProperties": True,
+        })
+
+    return profile
+
+
 def _normalize_template_profile_references(profile: Dict[str, Any], profile_path: str) -> Dict[str, Any]:
     """Resolve relative layout reference_image paths next to template_profile.json."""
     base_dir = Path(profile_path).resolve().parent
@@ -847,6 +928,47 @@ def _normalize_template_profile_references(profile: Dict[str, Any], profile_path
         if candidate.exists():
             layout["reference_image"] = str(candidate)
     return profile
+
+
+def attach_template_layout_profile(
+    slide_spec: Optional[Dict[str, Any]],
+    matched_layout: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Attach compact template layout metadata to a slide_spec.
+
+    The full TemplateProfile may include absolute reference image paths and
+    schema details. Metadata only needs the layout identity and decision hints
+    used for later slot planning, editing, and audit.
+    """
+    spec = copy.deepcopy(slide_spec) if isinstance(slide_spec, dict) else {}
+    if not matched_layout:
+        return spec
+
+    profile_keys = [
+        "id",
+        "page_type",
+        "summary",
+        "visual_signature",
+        "content_capacity",
+        "best_for",
+        "avoid_for",
+        "variation_tags",
+        "external_image_slots",
+        "reuse_friendly",
+        "reuse_reason",
+    ]
+    compact_profile = {
+        key: copy.deepcopy(matched_layout.get(key))
+        for key in profile_keys
+        if matched_layout.get(key) not in (None, "", [], {})
+    }
+    spec["template_layout_profile"] = compact_profile
+
+    if not spec.get("layout"):
+        layout_id = matched_layout.get("id") or "unknown"
+        summary = str(matched_layout.get("summary") or "").strip()
+        spec["layout"] = f"模板 {layout_id}：{summary}" if summary else f"模板 {layout_id}"
+    return spec
 
 
 # =============================================================================
@@ -877,8 +999,8 @@ def generate_prompt(
     it produces a precise element-by-element prompt.  Otherwise falls back to
     the original freeform content-based prompt.
 
-    Per-page composition rules live inside each style's `## 基础提示词模板`
-    (cover / content / data sub-blocks).
+    Built-in style prompts provide coarse composition rules; template clone mode
+    uses TemplateProfile page types and layout metadata before this fallback path.
     """
     if slide_spec and slide_spec.get("elements"):
         return generate_prompt_from_spec(
@@ -3360,6 +3482,7 @@ def main() -> None:
         parser.error("必须传 --style 或 --template-pptx / --template-images / --template-profile 至少其一")
 
     style_template = ""
+    style_layout_profile: Optional[Dict[str, Any]] = None
     if args.style:
         style_path = args.style
         if not os.path.isabs(style_path):
@@ -3367,6 +3490,7 @@ def main() -> None:
             if candidate.exists():
                 style_path = str(candidate)
         style_template = load_style_template(style_path)
+        style_layout_profile = load_style_layout_profile(style_path, style_template)
     else:
         style_path = "(template-derived)"
 
@@ -3415,6 +3539,9 @@ def main() -> None:
             if missing_refs:
                 print("(!)  --template-strict 已启用，但部分 layout 没有 reference_image，相关页会退化为纯 prompt 仿作。")
                 print(f"    缺 reference_image 的 layout: {', '.join(missing_refs[:8])}")
+    elif style_layout_profile:
+        template_profile = style_layout_profile
+        print(f"📚 使用内置 style layout bank: {template_profile.get('source')}")
 
     with open(args.plan, "r", encoding="utf-8") as f:
         slides_plan = json.load(f)
@@ -3529,14 +3656,8 @@ def main() -> None:
         if template_profile:
             matched_layout = assigned_layouts.get(slide_number) or match_layout(slide_info, template_profile)
             matched_layout_id = matched_layout.get("id") if matched_layout else None
-        if raw_slide_spec and matched_layout:
-            raw_slide_spec = copy.deepcopy(raw_slide_spec)
-            raw_slide_spec["template_layout_profile"] = {
-                "id": matched_layout.get("id"),
-                "page_type": matched_layout.get("page_type"),
-                "summary": matched_layout.get("summary"),
-                "external_image_slots": matched_layout.get("external_image_slots") or [],
-            }
+        if matched_layout:
+            raw_slide_spec = attach_template_layout_profile(raw_slide_spec, matched_layout)
         slide_spec = prepare_external_image_slots(raw_slide_spec, output_dir)
         external_slots = _slots_with_real_sources(_collect_external_image_slots(slide_spec), output_dir)
         generation_reference_images = _collect_generation_reference_images(slide_spec, output_dir)
